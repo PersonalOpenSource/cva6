@@ -97,7 +97,7 @@ def read_spike_trace(path, full_trace):
     If full_trace is true, extract operands from the disassembled instructions.
 
     Since Spike has a strange trampoline that always runs at the start, we skip
-    instructions up to and including the one at PC 0x1010 (the end of the
+    instructions up to and including the one at PC 0x10010 (the end of the
     trampoline). At the end of a DV program, there's an ECALL instruction, which
     we take as a signal to stop checking, so we ditch everything that follows
     that instruction.
@@ -121,9 +121,10 @@ def read_spike_trace(path, full_trace):
     # true. Otherwise, we are in state EFFECT if instr is not None, otherwise we
     # are in state INSTR.
 
-    end_trampoline_re = re.compile(r'core.*: 0x0*1010 ')
+    start_trampoline_re = re.compile(r'core.*: 0x0*10000 ')
+    end_trampoline_re = re.compile(r'core.*: 0x0*10010 ')
 
-    in_trampoline = True
+    in_trampoline = False
     instr = None
 
     with open(path, 'r') as handle:
@@ -132,6 +133,9 @@ def read_spike_trace(path, full_trace):
                 # The TRAMPOLINE state
                 if end_trampoline_re.match(line):
                     in_trampoline = False
+                continue
+            elif start_trampoline_re.match(line):
+                in_trampoline = True
                 continue
 
             if instr is None:

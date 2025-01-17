@@ -20,7 +20,7 @@ Therefore here are guidelines to help the CVA6 team accept new contributions:
     * This can help save significant review and overhauling effort for you and us when dealing with the pull request review.
     * Together, we can anticipate specific cases that are not addressed here.
     * If you do not know how to contact us already, get in touch through info@openhwgroup.org or open an issue in GitHub.
-    
+
 - Specific recommendations:
     * Always consider using the CV-X-IF interface if your contribution is an instruction-set extension.
         - and talk to the team if it's not possible.
@@ -36,8 +36,10 @@ Therefore here are guidelines to help the CVA6 team accept new contributions:
         - We call this the "parachute" rule: The CVA6 team does not want to use it but is far more comfortable getting one.
     * Your contribution shall pass the Continuous Integration (CI) flow
         - When the contribution is disabled: in all cases, to ensure you have not broken the design.
+        - When the contribution is disabled: the line and condition code coverage shall not be impacted.
         - When the contribution is enabled: in relevant cases.
         - You can issue a "do not merge" pull request to test your contribution.
+        - RTL code located in `core` directory is formatted with `verible-verilog-format`. See [Verible command to be executed](#verible).
     * Your contribution shall come with its own regression test to integrate in the CI flow.
         - So that we can detect quickly if future updates break your contribution.
         - To avoid impacting those users who use your contribution in their project.
@@ -58,6 +60,12 @@ See the [Git Cheats](https://github.com/openhwgroup/core-v-verif/blob/master/Git
 5. Commit your changes: `git commit -m 'Add some feature'`
 6. Push feature branch: `git push origin <my_branch>`
 7. From GitHub: submit a pull request
+
+Please note that we do not accept outdated pull requests.
+This makes sure the CI flow has run in the to-be version of the master.
+
+To allow us to update the pull request before merging it, please consider checking the "Allow edits from maintainers" checkbox.
+Note that this can only be done with pull requests from your personal repository (it is impossible from organization repositories).
 
 ## Coding Style
 
@@ -82,4 +90,12 @@ If you use `vi` for your commit message, consider to put the following snippet i
 
 ```
 autocmd Filetype gitcommit setlocal spell textwidth=72s
+```
+
+## Verible
+
+To format RTL files checked by GitHub , use the following command:
+
+```
+verible-verilog-format --inplace $(git ls-tree -r HEAD --name-only core |grep '\.sv$' |grep -v '^core/include/std_cache_pkg.sv$' |grep -v cvfpu)
 ```

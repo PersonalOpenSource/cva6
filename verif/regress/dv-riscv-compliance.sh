@@ -14,9 +14,11 @@ if ! [ -n "$RISCV" ]; then
 fi
 
 # install the required tools
-source verif/regress/install-cva6.sh
-source verif/regress/install-riscv-dv.sh
+source ./verif/regress/install-verilator.sh
+source ./verif/regress/install-spike.sh
 source verif/regress/install-riscv-compliance.sh
+
+source ./verif/sim/setup-env.sh
 
 if ! [ -n "$DV_TARGET" ]; then
   DV_TARGET=cv64a6_imafdc_sv39
@@ -25,6 +27,12 @@ fi
 if ! [ -n "$DV_SIMULATORS" ]; then
   DV_SIMULATORS=veri-testharness,spike
 fi
+
+if ! [ -n "$UVM_VERBOSITY" ]; then
+    export UVM_VERBOSITY=UVM_NONE
+fi
+
+export DV_OPTS="$DV_OPTS --issrun_opts=+tb_performance_mode+debug_disable=1+UVM_VERBOSITY=$UVM_VERBOSITY"
 
 cd verif/sim
 python3 cva6.py --testlist=../tests/testlist_riscv-compliance-$DV_TARGET.yaml --target $DV_TARGET --iss_yaml=cva6.yaml --iss=$DV_SIMULATORS $DV_OPTS

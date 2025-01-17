@@ -25,6 +25,10 @@ include:
   - project: '$CI_PROJECT_NAMESPACE/setup-ci'
     ref: '$SETUP_CI_CVV_BRANCH'
     file: 'cva6/core-v-verif-cva6.yml'
+  - local: '.gitlab-ci-custom.yml'
+    rules:
+      - exists:
+        - '.gitlab-ci-custom.yml'
 
 workflow:
   rules:
@@ -32,6 +36,9 @@ workflow:
       variables:
         CI_KIND: verif
     - if: $CI_COMMIT_BRANCH == "master"
+      variables:
+        CI_KIND: regress
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       variables:
         CI_KIND: regress
     - if: $CI_COMMIT_BRANCH =~ /.*_PR_.*/
@@ -46,10 +53,10 @@ workflow:
 variables:
   GIT_SUBMODULE_STRATEGY: recursive
   DASHBOARD: cva6
-  DV_TARGET: cv32a6_embedded
+  DV_TARGET: cv32a65x
 
 default:
-  tags: [$TAGS_RUNNER]
+  tags: [$TAGS_RUNNER_SIMU]
   artifacts:
     when: always
     paths:
@@ -65,6 +72,7 @@ stages:
 
 .setup_job:
   stage: setup
+  tags: [$TAGS_RUNNER]
   variables:
     GIT_SUBMODULE_STRATEGY: none
   rules: &on_dev
@@ -88,7 +96,8 @@ build_tools:
   extends:
     - .setup_job
   script:
-    - git submodule update --init verif/core-v-verif
+    # core-v-verif imports yaml-cpp as a submodule ==> recurse
+    - git submodule update --init --recursive verif/core-v-verif
     - source $SYN_VCS_BASHRC
     # ROOT_PROJECT is used by Spike installer and designates the toplevel of core-v-verif tree.
     - 'export ROOT_PROJECT=$(pwd)'
@@ -106,40 +115,49 @@ build_tools:
     - mkdir -p artifacts/tools/
     - mv tools/spike artifacts/tools/
 
+.copy_spike_artifacts: &copy_spike_artifacts
+  - mkdir -p tools
+  - mv artifacts/tools/spike tools
+  - /sbin/ldconfig -N tools/spike/lib
+
 .fe_smoke_test:
   stage: light tests
   rules: *on_dev
   before_script:
-    - mkdir -p tools
-    - mv artifacts/tools/spike tools
+    - git -C verif/core-v-verif fetch --unshallow
+    - !reference [.copy_spike_artifacts]
     - rm -rf artifacts/
     - mkdir -p artifacts/{reports,logs}
     - python3 .gitlab-ci/scripts/report_fail.py
     - echo $SYN_VCS_BASHRC; source $SYN_VCS_BASHRC
 
 .simu_after_script: &simu_after_script
-  - for i in verif/sim/*/v*_sim/*.log.iss ; do head -10000 $i > artifacts/logs/$(basename $i).head ; done
-  - python3 .gitlab-ci/scripts/report_simu.py verif/sim/logfile.log
+  - for i in $(find verif/sim/out*/[vq]*_sim -type f \( -name "*.csv" -o -name "*.iss" -o -name "*.yaml" \)) ; do tail -10000 $i > artifacts/logs/$(basename $i) ; done
+  - tail -10000 verif/sim/logfile.log > artifacts/logs/logfile.log
+  - if [ -n "$SPIKE_TANDEM" ]; then python3 .gitlab-ci/scripts/report_tandem.py verif/sim/out*/"$DV_SIMULATORS"_sim; else python3 .gitlab-ci/scripts/report_simu.py verif/sim/logfile.log; fi
 
-smoke:
+smoke-tests:
   extends:
     - .fe_smoke_test
   variables:
-    DASHBOARD_JOB_TITLE: "Smoke test $DV_SIMULATORS"
+    DASHBOARD_JOB_TITLE: "Smoke test $DV_SIMULATORS $DV_TARGET"
     DASHBOARD_JOB_DESCRIPTION: "Short tests to challenge most architectures with most testbenchs configurations"
     DASHBOARD_SORT_INDEX: 0
     DASHBOARD_JOB_CATEGORY: "Basic"
+    SPIKE_TANDEM: 1
+    COLLECT_SIMU_LOGS: 1
   parallel:
     matrix:
-      - DV_SIMULATORS:
-        - "veri-testharness,spike"
-        - "vcs-testharness,spike"
-        - "vcs-uvm,spike"
+      - DV_SIMULATORS: ["vcs-testharness", "questa-testharness"]
+        DV_TARGET: ["cv32a6_imac_sv32", "cv64a6_imafdc_sv39"]
+      - DV_SIMULATORS: "vcs-uvm"
+        DV_TARGET: "cv32a65x"
   script:
-    - source verif/regress/smoke-tests.sh
+    - if [[ $DV_SIMULATORS == *"questa"* ]]; then source $QUESTA_BASHRC; fi
+    - bash verif/regress/smoke-tests-$DV_TARGET.sh
     - !reference [.simu_after_script]
 
-gen_smoke:
+smoke-gen:
   extends:
     - .fe_smoke_test
   variables:
@@ -147,24 +165,33 @@ gen_smoke:
     DASHBOARD_JOB_DESCRIPTION: "Short generated tests to challenge the CVA6-DV on STEP1 configuration"
     DASHBOARD_SORT_INDEX: 0
     DASHBOARD_JOB_CATEGORY: "Basic"
-    DV_SIMULATORS: "vcs-uvm,spike"
+    DV_SIMULATORS: "vcs-uvm"
+    COLLECT_SIMU_LOGS: 1
+    SPIKE_TANDEM: 1
   script:
-    - source verif/regress/smoke-gen_tests.sh
+    - bash verif/regress/smoke-gen_tests.sh
+    - cp verif/sim/seedlist.yaml artifacts/logs/
     - !reference [.simu_after_script]
 
-coremark:
+smoke-bench:
   extends:
     - .fe_smoke_test
   variables:
-    DASHBOARD_JOB_TITLE: "CoreMark"
+    DASHBOARD_JOB_TITLE: "smoke-bench $DV_TARGET"
     DASHBOARD_JOB_DESCRIPTION: "Performance indicator"
     DASHBOARD_SORT_INDEX: 5
     DASHBOARD_JOB_CATEGORY: "Performance"
+    SPIKE_TANDEM: 1
+    BENCH: "dhrystone"
+  parallel:
+    matrix:
+      - DV_TARGET: "cv32a60x"
+      - DV_TARGET: "cv32a65x"
   script:
-    - bash verif/regress/coremark.sh --no-print
-    - python3 .gitlab-ci/scripts/report_benchmark.py --coremark verif/sim/out_*/veri-testharness_sim/core_main.log
+    - bash verif/regress/"$BENCH"_smoke.sh --no-print
+    - python3 .gitlab-ci/scripts/report_benchmark.py --"$BENCH"_"$DV_TARGET" verif/sim/out_*/vcs-uvm_sim/"$BENCH"_main.*.log
 
-hwconfig:
+smoke-hwconfig:
   extends:
     - .fe_smoke_test
   variables:
@@ -172,8 +199,10 @@ hwconfig:
     DASHBOARD_JOB_DESCRIPTION: "Short tests to challenge target configurations"
     DASHBOARD_SORT_INDEX: 1
     DASHBOARD_JOB_CATEGORY: "Basic"
-    DV_SIMULATORS: "veri-testharness,spike"
-    DV_HWCONFIG_OPTS: "--default_config=cv32a60x --isa=rv32imac"
+    DV_SIMULATORS: "vcs-uvm"
+    SPIKE_TANDEM: 1
+    DV_TARGET: "hwconfig"
+    DV_HWCONFIG_OPTS: "cv32a65x"
   script:
     - source verif/regress/hwconfig_tests.sh
     - python3 .gitlab-ci/scripts/report_pass.py
@@ -195,31 +224,66 @@ hwconfig:
     - when: manual
       allow_failure: true
 
+spyglass:
+  extends:
+    - .synthesis_test
+  variables:
+    DV_TARGET: cv32a65x
+    DASHBOARD_JOB_TITLE: "Report Spyglass Lint Errors"
+    DASHBOARD_JOB_DESCRIPTION: "Report lint errors and warnings detected by Spyglass"
+    DASHBOARD_SORT_INDEX: 5
+    DASHBOARD_JOB_CATEGORY: "Lint Check"
+  script:
+    - echo $SYN_SG_BASHRC; source $SYN_SG_BASHRC
+    - mkdir -p artifacts/lint_reports
+    - make -C spyglass design_read
+    - make -C spyglass lint_check
+    - mv spyglass/sg_run_results/cva6_sg_reports/cva6_lint_lint_rtl artifacts/lint_reports
+    - cp spyglass/reference_summary.rpt artifacts/lint_reports
+    - python3 .gitlab-ci/scripts/report_spyglass_lint.py spyglass/reference_summary.rpt artifacts/lint_reports/cva6_lint_lint_rtl/summary.rpt
+
+cvxif-regression:
+  extends:
+    - .synthesis_test
+  variables:
+    DASHBOARD_JOB_TITLE: "CVXIF non-regression test $DV_SIMULATORS"
+    DASHBOARD_JOB_DESCRIPTION: "Short tests to challenge most CoreV-X-Interface in testharness"
+    DASHBOARD_SORT_INDEX: 5
+    DASHBOARD_JOB_CATEGORY: "Basic"
+    COLLECT_SIMU_LOGS: 1
+  script:
+    - bash verif/regress/cvxif_verif_regression.sh
+    - if [[ $DV_SIMULATORS == *"spike"* ]]; then unset SPIKE_TANDEM; fi # dirty hack to do trace comparison between tandem execution and spike standalone
+    - !reference [.simu_after_script]
+
 asic-synthesis:
   extends:
     - .synthesis_test
+  tags: [$TAGS_RUNNER_SYNTH]
   variables:
     DASHBOARD_JOB_TITLE: "ASIC Synthesis $DV_TARGET"
     DASHBOARD_JOB_DESCRIPTION: "Synthesis indicator with specific Techno"
     DASHBOARD_SORT_INDEX: 5
     DASHBOARD_JOB_CATEGORY: "Synthesis"
-    INPUT_DELAY: "0.46"
-    OUTPUT_DELAY: "0.11"
-    PERIOD: "0.85"
+    PERIOD: "15"
+    DV_TARGET: cv32a65x
   script:
-    - echo $SYNTH_PERIOD
-    - echo $INPUT_DELAY
-    - echo $OUTPUT_DELAY
-    - echo $NAND2_AREA
-    - echo $FOUNDRY_PATH
     - echo $PERIOD
-    - echo $TECH_NAME
     - echo $DV_TARGET
-    - source verif/regress/install-cva6.sh
+    - source ./verif/sim/setup-env.sh
+    - git clone ${SYNTH_SCRIPT} ${SYNTH_SCRIPT_PATH} -b ${SYNTH_SCRIPT_BRANCH}
+    - git -C ${SYNTH_SCRIPT_PATH} checkout cce5ea41
+    - cp -r ${SYNTH_SCRIPT_PATH}/cva6/ ../
+    - git apply ${SYNTH_SCRIPT_PATH}/patches/*.patch
     - echo $SYN_DCSHELL_BASHRC; source $SYN_DCSHELL_BASHRC
-    - make -C pd/synth cva6_synth TARGET="$DV_TARGET"
-    - mv pd/synth/cva6_${DV_TARGET}_synth_modified.v artifacts/cva6_${DV_TARGET}_synth_modified.v
-    - python3 .gitlab-ci/scripts/report_synth.py pd/synth/cva6_${DV_TARGET}/reports/$PERIOD/cva6_$(echo $TECH_NAME)_synth_area.rpt pd/synth/synthesis_batch.log
+    - cp -r ${SYNTH_FLOW} ./
+    - python3 ${SYNTH_SCRIPT_PATH}/scharm -p configs/modules/CVA6.yml --runner=True --compaign="only-synth"
+    - export NAND2_AREA=$(cat pd/synth/cva6_${DV_TARGET}/nand2area.txt)
+    - python3 .gitlab-ci/scripts/report_synth.py pd/synth/cva6_${DV_TARGET}/$PERIOD/reports/cva6_${DV_TARGET}_synth_area.rpt pd/synth/cva6_${DV_TARGET}/$PERIOD/reports/cva6_${DV_TARGET}_synthesis.log
+    - mv ${SYNTH_SCRIPT_PATH}/artifacts/ artifacts/artifacts_synth/
+    - mv pd/synth/cva6_${DV_TARGET}/ artifacts/
+    - mv pd/synth/cva6_${DV_TARGET}_synth.v artifacts/
+    - mv pd/synth/cva6_${DV_TARGET}_synth.sdf artifacts/
 
 fpga-build:
   extends:
@@ -229,11 +293,12 @@ fpga-build:
     DASHBOARD_JOB_DESCRIPTION: "Test of FPGA build flow"
     DASHBOARD_SORT_INDEX: 9
     DASHBOARD_JOB_CATEGORY: "Synthesis"
-    TARGET: cv32a60x
+    TARGET: cv32a6_imac_sv32
   script:
     - source $VIVADO_SETUP
-    - source verif/regress/install-cva6.sh
-    - make fpga target=$TARGET
+    - source ./verif/sim/setup-env.sh
+    - mkdir -p artifacts/logs
+    - make fpga target=$TARGET &> artifacts/logs/logfile.log
     - mkdir -p artifacts/reports
     - mv corev_apu/fpga/work-fpga/ariane_xilinx.bit artifacts/ariane_xilinx_$TARGET.bit
     - python3 .gitlab-ci/scripts/report_fpga.py corev_apu/fpga/reports/ariane.utilization.rpt
@@ -248,17 +313,32 @@ fpga-build:
     - when: manual
       allow_failure: true
 
-dhrystone:
+benchmarks:
   extends:
     - .regress_test
   variables:
-    DASHBOARD_JOB_TITLE: "Dhrystone"
+    DASHBOARD_JOB_TITLE: "benchmark $BENCH $ISSUE"
     DASHBOARD_JOB_DESCRIPTION: "Performance indicator"
     DASHBOARD_SORT_INDEX: 5
     DASHBOARD_JOB_CATEGORY: "Performance"
+    SPIKE_TANDEM: 1
+  parallel:
+    matrix:
+      - BENCH: "dhrystone"
+        ISSUE: "single"
+        DV_HWCONFIG_OPTS: ["cv32a60x IcacheByteSize=16384 IcacheSetAssoc=8 DcacheByteSize=32768 DcacheSetAssoc=8 BHTEntries=128 NrScoreboardEntries=8 DCacheType=config_pkg::WT"]
+      - BENCH: "dhrystone"
+        ISSUE: "dual"
+        DV_HWCONFIG_OPTS: ["cv32a65x IcacheByteSize=16384 IcacheSetAssoc=8 DcacheByteSize=32768 DcacheSetAssoc=8 BHTEntries=128 NrScoreboardEntries=8 DCacheType=config_pkg::WT"]
+      - BENCH: "coremark"
+        ISSUE: "single"
+        DV_HWCONFIG_OPTS: ["cv32a60x IcacheByteSize=16384 IcacheSetAssoc=8 DcacheByteSize=32768 DcacheSetAssoc=8 BHTEntries=128 NrScoreboardEntries=8 DCacheType=config_pkg::WT"]
+      - BENCH: "coremark"
+        ISSUE: "dual"
+        DV_HWCONFIG_OPTS: ["cv32a65x IcacheByteSize=16384 IcacheSetAssoc=8 DcacheByteSize=32768 DcacheSetAssoc=8 BHTEntries=128 NrScoreboardEntries=8 DCacheType=config_pkg::WT"]
   script:
-    - bash verif/regress/dhrystone.sh
-    - python3 .gitlab-ci/scripts/report_benchmark.py --dhrystone verif/sim/out_*/veri-testharness_sim/dhrystone_main.log
+    - bash verif/regress/"$BENCH".sh
+    - python3 .gitlab-ci/scripts/report_benchmark.py --"$BENCH"_"$ISSUE" verif/sim/out_*/vcs-uvm_sim/"$BENCH"_main.*.log
 
 riscv_arch_test:
   extends:
@@ -268,11 +348,13 @@ riscv_arch_test:
     DASHBOARD_JOB_DESCRIPTION: "Compliance regression suite"
     DASHBOARD_SORT_INDEX: 0
     DASHBOARD_JOB_CATEGORY: "Test suites"
-    DV_SIMULATORS: "veri-testharness,spike"
+    DV_SIMULATORS: "vcs-testharness"
+    SPIKE_TANDEM: 1
   script: source verif/regress/dv-riscv-arch-test.sh
   after_script: *simu_after_script
 
 compliance:
+  timeout : 2 hours
   extends:
     - .regress_test
   variables:
@@ -280,11 +362,13 @@ compliance:
     DASHBOARD_JOB_DESCRIPTION: "Compliance regression suite"
     DASHBOARD_SORT_INDEX: 2
     DASHBOARD_JOB_CATEGORY: "Test suites"
-    DV_SIMULATORS: "veri-testharness,spike"
+    DV_SIMULATORS: "vcs-testharness"
+    SPIKE_TANDEM: 1
   script: source verif/regress/dv-riscv-compliance.sh
   after_script: *simu_after_script
 
 riscv-tests-v:
+  timeout : 2 hours
   extends:
     - .regress_test
   variables:
@@ -306,7 +390,8 @@ riscv-tests-p:
     DASHBOARD_JOB_DESCRIPTION: "Riscv-test regression suite (physical)"
     DASHBOARD_SORT_INDEX: 4
     DASHBOARD_JOB_CATEGORY: "Test suites"
-    DV_SIMULATORS: "veri-testharness,spike"
+    DV_SIMULATORS: "vcs-testharness"
+    SPIKE_TANDEM: 1
     DV_TESTLISTS: "../tests/testlist_riscv-tests-$DV_TARGET-p.yaml"
   script: source verif/regress/dv-riscv-tests.sh
   after_script: *simu_after_script
@@ -316,21 +401,10 @@ riscv-tests-p:
     - .regress_test
   rules: &on_verif
     - if: $CI_KIND == "verif"
+      allow_failure: true
     - when: manual
       allow_failure: true
-  timeout: 4h
-
-csr_test:
-  extends:
-    - .verif_test
-  variables:
-    DASHBOARD_JOB_TITLE: "csr_test $DV_TARGET"
-    DASHBOARD_JOB_DESCRIPTION: "CSR regression suite"
-    DASHBOARD_SORT_INDEX: 0
-    DASHBOARD_JOB_CATEGORY: "Test suites"
-    DV_SIMULATORS: "veri-testharness,spike"
-  script: source verif/regress/dv-riscv-csr-access-test.sh
-  after_script: *simu_after_script
+  timeout: 6h
 
 mmu_sv32_tests:
   extends:
@@ -341,7 +415,7 @@ mmu_sv32_tests:
     DASHBOARD_SORT_INDEX: 0
     DASHBOARD_JOB_CATEGORY: "Test suites"
     DV_SIMULATORS: "veri-testharness,spike"
-    DV_TARGET: cv32a60x
+    DV_TARGET: cv32a6_imac_sv32
   script: source verif/regress/dv-riscv-mmu-sv32-test.sh
   after_script: *simu_after_script
 
@@ -351,6 +425,8 @@ generated_tests:
   variables:
     DASHBOARD_SORT_INDEX: 11
     DASHBOARD_JOB_CATEGORY: "Code Coverage"
+    SPIKE_TANDEM: 1
+    DV_SIMULATORS: "vcs-uvm"
   parallel:
     matrix:
       - list_num: 1
@@ -360,8 +436,8 @@ generated_tests:
         DASHBOARD_JOB_TITLE: "Generated Hazard Arithmetic tests"
         DASHBOARD_JOB_DESCRIPTION: "Generate Hazard register (RAW) Arithmetic tests using CVA6-DV"
       - list_num: 3
-        DASHBOARD_JOB_TITLE: "Generated CSR tests"
-        DASHBOARD_JOB_DESCRIPTION: "Generate Random CSR tests using CVA6-DV"
+        DASHBOARD_JOB_TITLE: "Generated Illegal instruction tests"
+        DASHBOARD_JOB_DESCRIPTION: "Generate Random Illegal instruction tests using CVA6-DV"
       - list_num: 4
         DASHBOARD_JOB_TITLE: "Generated MMU tests"
         DASHBOARD_JOB_DESCRIPTION: "Generate Random MMU tests using CVA6-DV"
@@ -378,12 +454,14 @@ generated_tests:
     - mv verif/sim/seedlist.yaml artifacts/coverage
     - python3 .gitlab-ci/scripts/report_pass.py
 
-generated_xif_tests:
+.generated_xif_tests:
   extends:
     - .verif_test
   variables:
     DASHBOARD_SORT_INDEX: 12
     DASHBOARD_JOB_CATEGORY: "Code Coverage"
+    SPIKE_TANDEM: 1
+    DV_SIMULATORS: "vcs-uvm"
   parallel:
     matrix:
       - list_num: 1
@@ -402,6 +480,8 @@ directed_isacov-tests:
   variables:
     DASHBOARD_SORT_INDEX: 13
     DASHBOARD_JOB_CATEGORY: "Functional Coverage"
+    SPIKE_TANDEM: 1
+    DV_SIMULATORS: "vcs-uvm"
   parallel:
     matrix:
       - list_num: 0
@@ -413,22 +493,21 @@ directed_isacov-tests:
     - mv verif/sim/vcs_results/default/vcs.d/simv.vdb artifacts/coverage
     - python3 .gitlab-ci/scripts/report_pass.py
 
-directed_xif-tests:
+csr_embedded_tests:
   extends:
     - .verif_test
   variables:
+    DASHBOARD_JOB_TITLE: "csr_embedded test $DV_TARGET"
+    DASHBOARD_JOB_DESCRIPTION: "CSR Test generated using UVM-REG"
     DASHBOARD_SORT_INDEX: 15
-    DASHBOARD_JOB_CATEGORY: "Functional Coverage"
-  parallel:
-    matrix:
-      - list_num: 0
-        DASHBOARD_JOB_TITLE: "Directed tests"
-        DASHBOARD_JOB_DESCRIPTION: "Execute directed tests to improve functional coverage of cvxif"
+    DASHBOARD_JOB_CATEGORY: "CSR tests"
+    DV_SIMULATORS: "vcs-uvm"
+    SPIKE_TANDEM: 1
   script:
     - mkdir -p artifacts/coverage
-    - source verif/regress/dv-generated-xif-tests.sh
+    - source verif/regress/dv-csr-embedded-tests.sh
     - mv verif/sim/vcs_results/default/vcs.d/simv.vdb artifacts/coverage
-    - python3 .gitlab-ci/scripts/report_pass.py
+    - python3 .gitlab-ci/scripts/report_tandem.py verif/sim/out*/"$DV_SIMULATORS"_sim
 
 .backend_test:
   stage: backend tests
@@ -436,38 +515,58 @@ directed_xif-tests:
     - mkdir -p artifacts/{reports,logs}
     - python3 .gitlab-ci/scripts/report_fail.py
 
-smoke-gate:
+simu-gate:
+  timeout : 4 hours
   extends:
     - .backend_test
   needs:
     - build_tools
     - asic-synthesis
+  parallel:
+    matrix:
+      - PROG_NAME:   ["dhrystone_smoke"]
   variables:
-    DASHBOARD_JOB_TITLE: "Smoke Gate $DV_TARGET"
-    DASHBOARD_JOB_DESCRIPTION: "Simple test to check netlist from ASIC synthesis"
+    DASHBOARD_JOB_TITLE: "Gate Level Simulation $DV_TARGET"
+    DASHBOARD_JOB_DESCRIPTION: "Tests to check netlist from ASIC synthesis and power consumption over different patterns"
     DASHBOARD_SORT_INDEX: 6
     DASHBOARD_JOB_CATEGORY: "Post Synthesis"
+    DV_TARGET: cv32a65x
+    TARGET: $DV_TARGET
+    TOP: "cva6"
+    SPIKE_TANDEM: 1
+    SIMU_PERIOD: "20"  # 50 Mhz
+    PERIOD: "15"  # 66 Mhz
   script:
-    - mkdir -p tools
-    - mv artifacts/tools/spike tools
-    - echo $SYN_VCS_BASHRC; source $SYN_VCS_BASHRC
-    - echo $LIB_VERILOG
-    - echo $FOUNDRY_PATH
+    - mkdir -p artifacts/{reports,logs}
+    - git -C verif/core-v-verif fetch --unshallow
+    - !reference [.copy_spike_artifacts]
     - echo $PERIOD
-    - echo $TECH_NAME
-    - source verif/regress/install-cva6.sh
-    - source verif/regress/install-riscv-dv.sh
+    - source ./verif/sim/setup-env.sh
+    - git clone ${SYNTH_SCRIPT} ${SYNTH_SCRIPT_PATH} -b ${SYNTH_SCRIPT_BRANCH}
+    - git -C ${SYNTH_SCRIPT_PATH} checkout cce5ea41
+    - cp -r ${SYNTH_SCRIPT_PATH}/cva6/ ../
+    - git apply ${SYNTH_SCRIPT_PATH}/patches/*.patch
     - source verif/regress/install-riscv-tests.sh
-    - mv artifacts/cva6_${DV_TARGET}_synth_modified.v pd/synth/cva6_${DV_TARGET}_synth_modified.v
-    - cd verif/sim
-    - make vcs_clean_all
-    - python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv32a60x-p.yaml --test rv32ui-p-lw --iss_yaml cva6.yaml --target $DV_TARGET --iss=spike,vcs-gate $DV_OPTS
-  after_script: *simu_after_script
+    - mv artifacts/${TOP}_${DV_TARGET} pd/synth/
+    - mv artifacts/${TOP}_${DV_TARGET}_synth.v pd/synth/
+    - mv artifacts/${TOP}_${DV_TARGET}_synth.sdf pd/synth/
+    - mkdir -p pd/synth/${TOP}_${DV_TARGET}/outputs/
+    - export DV_SIMULATORS="spike"
+    - bash verif/regress/${PROG_NAME}.sh
+    - cp verif/sim/out_*/directed_tests/*.o verif/sim/testelf.o
+    - python3 ${SYNTH_SCRIPT_PATH}/scharm -p configs/modules/CVA6.yml --runner=True --compaign="simu-gate" --name=testelf
+    - grep "Simulation terminated" verif/sim/out_*/*/*.log.iss
+    - mv ${SYNTH_SCRIPT_PATH}/artifacts/ artifacts/artifacts_gate/
+    - rm artifacts/artifacts_gate/*/build/*.fsdb
+    - mkdir -p verif/sim/out_reports
+    - mkdir -p artifacts/sim_artifacts
+    - for i in verif/sim/out*/vcs-uvm-gate*/*; do cp $i $(dirname $(dirname $i))/vcs-uvm_sim/gate.$(basename $i); done
+    - python3 .gitlab-ci/scripts/report_tandem.py verif/sim/out*/vcs-uvm_sim
 
 fpga-boot:
   extends:
     - .backend_test
-  tags: [fpga,shell]
+  tags: [$TAGS_RUNNER_FPGA]
   needs:
     - build_tools
     - fpga-build
@@ -476,17 +575,16 @@ fpga-boot:
     DASHBOARD_JOB_DESCRIPTION: "Test of Linux 32 bits boot on FPGA Genesys2"
     DASHBOARD_SORT_INDEX: 10
     DASHBOARD_JOB_CATEGORY: "Synthesis"
-    VERILATOR_INSTALL_DIR: "NO" # Skip install and checks of verilator
-    SPIKE_INSTALL_DIR: "NO"  # Skip install and checks of spike
   script:
-    - source verif/regress/install-cva6.sh
+    - source ./verif/sim/setup-env.sh
     - source $VIVADO2022_SETUP
     - mkdir -p corev_apu/fpga/work-fpga
-    - mv artifacts/ariane_xilinx_cv32a60x.bit corev_apu/fpga/work-fpga/ariane_xilinx.bit
+    - mv artifacts/ariane_xilinx_cv32a6_imac_sv32.bit corev_apu/fpga/work-fpga/ariane_xilinx.bit
     - cd corev_apu/fpga/scripts
     - source check_fpga_boot.sh
     - cd -
     - python3 .gitlab-ci/scripts/report_fpga_boot.py corev_apu/fpga/scripts/fpga_boot.rpt
+  retry: 1
 
 code_coverage-report:
   extends:
@@ -494,8 +592,8 @@ code_coverage-report:
   needs:
     - generated_tests
     - directed_isacov-tests
-    - generated_xif_tests
-    - directed_xif-tests
+#    - generated_xif_tests
+    - csr_embedded_tests
   variables:
     DASHBOARD_JOB_TITLE: "Report merge coverage"
     DASHBOARD_JOB_DESCRIPTION: "Report merge coverage of generated tests"
@@ -509,10 +607,11 @@ code_coverage-report:
     - mv artifacts/coverage/seedlist.yaml verif/sim/seedlist.yaml
     - make -C verif/sim generate_cov_dash
     - mv verif/sim/urgReport artifacts/cov_reports/
-    - python3 .gitlab-ci/scripts/report_coverage.py artifacts/cov_reports/urgReport/hierarchy.txt
+    - python3 .gitlab-ci/scripts/report_coverage.py artifacts/cov_reports/urgReport/hierarchy.txt artifacts/cov_reports/urgReport/"feature.CVA6 Verification Master Plan1.7.-1268999905.txt"
 
 check gitlab jobs status:
   stage: find failures
+  tags: [$TAGS_RUNNER]
   rules:
     - if: $DASHBOARD_URL && $CI_KIND != "none"
       when: on_failure
@@ -529,6 +628,7 @@ check gitlab jobs status:
 
 merge reports:
   stage: report
+  tags: [$TAGS_RUNNER]
   variables:
     GIT_SUBMODULE_STRATEGY: none
   rules:

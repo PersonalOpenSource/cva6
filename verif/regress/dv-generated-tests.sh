@@ -7,22 +7,23 @@
 #
 # Original Author: Ayoub JALALI (ayoub.jalali@external.thalesgroup.com)
 
+if [ -n "$RISCV_ZCB" ]; then
+  echo "Using RISCV_ZCB to support Zcb extension"
+  RISCV=$RISCV_ZCB
+fi
+
 if ! [ -n "$RISCV" ]; then
   echo "Error: RISCV variable undefined"
   return
 fi
 
 # install the required tools
-source verif/regress/install-cva6.sh
-source verif/regress/install-riscv-dv.sh
-source verif/regress/install-spike.sh
+source ./verif/regress/install-spike.sh
+
+source ./verif/sim/setup-env.sh
 
 if ! [ -n "$DV_TARGET" ]; then
-  DV_TARGET=cv32a6_embedded
-fi
-
-if ! [ -n "$DV_SIMULATORS" ]; then
-  DV_SIMULATORS=vcs-uvm,spike
+  DV_TARGET=cv32a65x
 fi
 
 if ! [ -n "$list_num" ]; then
@@ -45,12 +46,10 @@ if [[ "$list_num" = 1 ]];then
   TEST_NAME=(
            "riscv_arithmetic_basic_test_no_comp"
            "riscv_arithmetic_basic_test_bcomp"
-           "riscv_arithmetic_basic_illegal"
            "riscv_arithmetic_basic_test_comp"
-           "riscv_arithmetic_basic_illegal_hint_test"
            "riscv_arithmetic_basic_loop_test"
            );
-   I=(100 100 20 100 20 20);
+   I=(100 100 100 20);
 elif [[ "$list_num" = 2 ]];then
   TEST_NAME=(
            "riscv_arithmetic_basic_same_reg_test"
@@ -60,12 +59,11 @@ elif [[ "$list_num" = 2 ]];then
    I=(100 100 100);
 elif [[ "$list_num" = 3 ]];then
   TEST_NAME=(
-           "riscv_arithmetic_basic_csr_dummy"
-           "riscv_arithmetic_basic_Randcsr_test"
+           "riscv_arithmetic_basic_illegal"
+           "riscv_arithmetic_basic_illegal_hint_test"
            "riscv_arithmetic_basic_ebreak_dret_test"
-           "riscv_arithmetic_basic_illegal_csr"
            );
-   I=(20 20 20 20);
+   I=(100 100 20);
 elif [[ "$list_num" = 4 ]];then
 	TEST_NAME=(
            "riscv_mmu_stress_hint_test"
@@ -79,7 +77,7 @@ elif [[ "$list_num" = 5 ]];then
            "riscv_load_store_hazard_test"
            "riscv_unaligned_load_store_test"
            );
-   I=(50 50 50 50);
+   I=(100 100 100 100);
 elif [[ "$list_num" = 6 ]];then
 	TEST_NAME=(
            "riscv_rand_jump_hint_comp_test"
@@ -111,7 +109,7 @@ printf "+=======================================================================
 j=0
 while [[ $j -lt ${#TEST_NAME[@]} ]];do
   cp ../env/corev-dv/custom/riscv_custom_instr_enum.sv ./dv/src/isa/custom/
-  python3 cva6.py --testlist=$TESTLIST_FILE --test ${TEST_NAME[j]} --iss_yaml cva6.yaml --target $DV_TARGET -cs ../env/corev-dv/target/rv32imc/ --mabi ilp32 --isa rv32imc --simulator_yaml ../env/corev-dv/simulator.yaml --iss=vcs-uvm,spike -i ${I[j]} -bz 1 --iss_timeout 300
+  python3 cva6.py --testlist=$TESTLIST_FILE --test ${TEST_NAME[j]} --iss_yaml cva6.yaml --target $DV_TARGET -cs ../env/corev-dv/target/rv32imcb/ --mabi ilp32 --isa rv32imc --isa_extension="zba,zbb,zbc,zbs,zcb" --simulator_yaml ../env/corev-dv/simulator.yaml --iss=vcs-uvm,spike --priv=m -i ${I[j]} -bz 1 --iss_timeout 300
   n=0
   echo "Generate the test: ${TEST_NAME[j]}"
 #this while loop detects the failed tests from the log file and remove them
@@ -134,6 +132,6 @@ done
 j=0
 elif [[ "$list_num" = 0 ]];then
    printf "==== Execute Directed tests to improve functional coverage of isa, by hitting corners !!! ====\n\n"
-   python3 cva6.py --testlist=$DIRECTED_TESTLIST --iss_yaml cva6.yaml --target $DV_TARGET --iss=vcs-uvm,spike
+   python3 cva6.py --testlist=$DIRECTED_TESTLIST --iss_yaml cva6.yaml --isa_extension="zcb" --target $DV_TARGET --iss=vcs-uvm,spike --priv=m --linker=../../config/gen_from_riscv_config/$DV_TARGET/linker/link.ld
 fi
 cd -

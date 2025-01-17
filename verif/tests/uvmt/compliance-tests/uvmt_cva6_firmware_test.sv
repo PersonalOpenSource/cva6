@@ -62,19 +62,14 @@ class uvmt_cva6_firmware_test_c extends uvmt_cva6_base_test_c;
    extern virtual task configure_phase(uvm_phase phase);
 
    /**
+    *  Override types with the UVM Factory
+    */
+   extern virtual function void build_phase(uvm_phase phase);
+
+   /**
     *  Enable program execution, wait for completion.
     */
    extern virtual task run_phase(uvm_phase phase);
-
-   /**
-    *  Start the interrupt sequencer to apply random interrupts during test
-    */
-   extern virtual task irq_noise();
-
-   /**
-    *  Randomly assert/deassert fetch_enable_i
-    */
-   extern virtual task random_fetch_toggle();
 
 endclass : uvmt_cva6_firmware_test_c
 
@@ -91,6 +86,14 @@ task uvmt_cva6_firmware_test_c::reset_phase(uvm_phase phase);
    super.reset_phase(phase);
 
 endtask : reset_phase
+
+function void uvmt_cva6_firmware_test_c::build_phase(uvm_phase phase);
+   super.build_phase(phase);
+
+   `uvm_info("firmware_test", "Overriding Reference Model with Spike", UVM_NONE)
+   set_type_override_by_type(uvmc_rvfi_reference_model::get_type(),uvmc_rvfi_spike::get_type());
+
+endfunction : build_phase
 
 
 task uvmt_cva6_firmware_test_c::configure_phase(uvm_phase phase);
@@ -128,18 +131,6 @@ task uvmt_cva6_firmware_test_c::run_phase(uvm_phase phase);
    // start_clk() and watchdog_timer() are called in the base_test
    super.run_phase(phase);
 
-   if ($test$plusargs("gen_irq_noise")) begin
-    fork
-      irq_noise();
-    join_none
-   end
-
-   if ($test$plusargs("random_fetch_toggle")) begin
-     fork
-       random_fetch_toggle();
-     join_none
-   end
-
    phase.raise_objection(this);
    @(posedge env_cntxt.clknrst_cntxt.vif.reset_n);
    repeat (33) @(posedge env_cntxt.clknrst_cntxt.vif.clk);
@@ -147,58 +138,23 @@ task uvmt_cva6_firmware_test_c::run_phase(uvm_phase phase);
    // The firmware is expected to write exit status and pass/fail indication to the Virtual Peripheral.
    // The format of rvfi_vif.tb_exit_o is { wire[31:1] exit_code, wire test_finished }.
    wait (
-          (rvfi_vif.tb_exit_o[0]     == 1'b1)
+          (tb_exit_vif.tb_exit_o[0]  == 1'b1)
         );
    `uvm_info("TEST", "Test FINISHED", UVM_NONE)
    // Set sim_finished (otherwise tb will flag that sim was aborted)
    uvm_config_db#(bit)::set(null, "", "sim_finished", 1);
-   uvm_config_db#(int)::set(null, "", "test_exit_code", { 0'b0, rvfi_vif.tb_exit_o[31:1] });
+   uvm_config_db#(int)::set(null, "", "test_exit_code", { 0'b0, tb_exit_vif.tb_exit_o[31:1] });
    // Let the termination-triggering instruction appear in the log.
    @(posedge env_cntxt.clknrst_cntxt.vif.clk);
+   // Let all pending AXI requests settle.
+   // FIXME TODO: Insert this delay in AXI agent rather than here,
+   // based on AXI state and latency setting.
+   `uvm_info("TEST", "Running a 100-cycle delay to settle AXI requests...", UVM_NONE);
+   repeat (100) @(posedge env_cntxt.clknrst_cntxt.vif.clk);
+   `uvm_info("TEST", "Running a 100-cycle delay to settle AXI requests... DONE", UVM_NONE);
    // Allow termination from now on.
    phase.drop_objection(this);
-   repeat (100) @(posedge env_cntxt.clknrst_cntxt.vif.clk);
 
 endtask : run_phase
-
-task uvmt_cva6_firmware_test_c::irq_noise();
-  `uvm_info("TEST", "Starting IRQ Noise thread in UVM test", UVM_NONE);
-//  while (1) begin
-//    uvme_cva6_interrupt_noise_c interrupt_noise_vseq;
-
-//    interrupt_noise_vseq = uvme_cva6_interrupt_noise_c::type_id::create("interrupt_noise_vseqr");
-//    assert(interrupt_noise_vseq.randomize() with {
-//      reserved_irq_mask == 32'h0;
-//    });
-//    interrupt_noise_vseq.start(vsequencer);
-//    break;
-//  end
-endtask : irq_noise
-
-task uvmt_cva6_firmware_test_c::random_fetch_toggle();
-  `uvm_info("TEST", "Starting random_fetch_toggle thread in UVM test", UVM_NONE);
-  while (1) begin
-    int unsigned fetch_assert_cycles;
-    int unsigned fetch_deassert_cycles;
-
-    // Randomly assert for a random number of cycles
-    randcase
-      9: fetch_assert_cycles = $urandom_range(100_000, 100);
-      1: fetch_assert_cycles = $urandom_range(100, 1);
-      1: fetch_assert_cycles = $urandom_range(3, 1);
-    endcase
-//    repeat (fetch_assert_cycles) @(core_cntrl_vif.drv_cb);
-//    core_cntrl_vif.stop_fetch();
-
-    // Randomly dessert for a random number of cycles
-    randcase
-      3: fetch_deassert_cycles = $urandom_range(100, 1);
-      1: fetch_deassert_cycles = $urandom_range(3, 1);
-    endcase
-//    repeat (fetch_deassert_cycles) @(core_cntrl_vif.drv_cb);
-//    core_cntrl_vif.go_fetch();
-  end
-
-endtask : random_fetch_toggle
 
 `endif // __UVMT_CVA6_FIRMWARE_TEST_SV__

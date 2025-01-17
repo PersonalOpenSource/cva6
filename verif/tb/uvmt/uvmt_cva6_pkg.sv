@@ -29,6 +29,7 @@
 
 `include "uvmt_axi_switch_intf.sv"
 `include "uvmt_default_inputs_intf.sv"
+`include "uvma_axi_intf.sv"
 
 /**
  * Encapsulates all the types and test cases for the verification of an
@@ -37,9 +38,14 @@
 package uvmt_cva6_pkg;
 
    import uvm_pkg::*;
+   import uvma_core_cntrl_pkg::*;
    import uvme_cva6_pkg::*;
+   import uvmc_rvfi_reference_model_pkg::*;
+   import uvma_cva6pkg_utils_pkg::*;
    import uvml_hrtbt_pkg::*;
    import uvml_logs_pkg::*;
+   import uvml_mem_pkg::*;
+   import uvma_axi_pkg::*;
 
    // Constants / Structs / Enums
    `include "uvmt_cva6_constants.sv"

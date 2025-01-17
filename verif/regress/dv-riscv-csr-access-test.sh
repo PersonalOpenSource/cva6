@@ -14,12 +14,14 @@ if ! [ -n "$RISCV" ]; then
 fi
 
 # install the required tools
-source verif/regress/install-cva6.sh
-source verif/regress/install-riscv-dv.sh
+source ./verif/regress/install-verilator.sh
+source ./verif/regress/install-spike.sh
 source verif/regress/install-riscv-arch-test.sh
 
+source ./verif/sim/setup-env.sh
+
 if ! [ -n "$DV_TARGET" ]; then
-  DV_TARGET=cv32a60x
+  DV_TARGET=cv32a6_imac_sv32
 fi
 
 if ! [ -n "$DV_SIMULATORS" ]; then

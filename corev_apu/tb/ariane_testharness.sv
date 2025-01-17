@@ -14,38 +14,19 @@
 //              Instantiates an AXI-Bus and memories
 
 `include "axi/assign.svh"
+`include "rvfi_types.svh"
+
+`ifdef VERILATOR
+`include "custom_uvm_macros.svh"
+`else
+`include "uvm_macros.svh"
+`endif
 
 module ariane_testharness #(
-  parameter config_pkg::cva6_cfg_t CVA6Cfg = cva6_config_pkg::cva6_cfg,
-  parameter bit IsRVFI = bit'(cva6_config_pkg::CVA6ConfigRvfiTrace),
-  parameter type rvfi_instr_t = struct packed {
-    logic [config_pkg::NRET-1:0]                  valid;
-    logic [config_pkg::NRET*64-1:0]               order;
-    logic [config_pkg::NRET*config_pkg::ILEN-1:0] insn;
-    logic [config_pkg::NRET-1:0]                  trap;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      cause;
-    logic [config_pkg::NRET-1:0]                  halt;
-    logic [config_pkg::NRET-1:0]                  intr;
-    logic [config_pkg::NRET*2-1:0]                mode;
-    logic [config_pkg::NRET*2-1:0]                ixl;
-    logic [config_pkg::NRET*5-1:0]                rs1_addr;
-    logic [config_pkg::NRET*5-1:0]                rs2_addr;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      rs1_rdata;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      rs2_rdata;
-    logic [config_pkg::NRET*5-1:0]                rd_addr;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      rd_wdata;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      pc_rdata;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      pc_wdata;
-    logic [config_pkg::NRET*riscv::VLEN-1:0]      mem_addr;
-    logic [config_pkg::NRET*riscv::PLEN-1:0]      mem_paddr;
-    logic [config_pkg::NRET*(riscv::XLEN/8)-1:0]  mem_rmask;
-    logic [config_pkg::NRET*(riscv::XLEN/8)-1:0]  mem_wmask;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      mem_rdata;
-    logic [config_pkg::NRET*riscv::XLEN-1:0]      mem_wdata;
-  },
+  parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),
   //
-  parameter int unsigned AXI_USER_WIDTH    = ariane_pkg::AXI_USER_WIDTH,
-  parameter int unsigned AXI_USER_EN       = ariane_pkg::AXI_USER_EN,
+  parameter int unsigned AXI_USER_WIDTH    = CVA6Cfg.AxiUserWidth,
+  parameter int unsigned AXI_USER_EN       = CVA6Cfg.AXI_USER_EN,
   parameter int unsigned AXI_ADDRESS_WIDTH = 64,
   parameter int unsigned AXI_DATA_WIDTH    = 64,
   parameter bit          InclSimDTM        = 1'b1,
@@ -61,6 +42,19 @@ module ariane_testharness #(
 
   localparam [7:0] hart_id = '0;
 
+  // RVFI
+  localparam type rvfi_instr_t = `RVFI_INSTR_T(CVA6Cfg);
+  localparam type rvfi_csr_elmt_t = `RVFI_CSR_ELMT_T(CVA6Cfg);
+  localparam type rvfi_csr_t = `RVFI_CSR_T(CVA6Cfg, rvfi_csr_elmt_t);
+
+  // RVFI PROBES
+  localparam type rvfi_probes_instr_t = `RVFI_PROBES_INSTR_T(CVA6Cfg);
+  localparam type rvfi_probes_csr_t = `RVFI_PROBES_CSR_T(CVA6Cfg);
+  localparam type rvfi_probes_t = struct packed {
+    rvfi_probes_csr_t csr;
+    rvfi_probes_instr_t instr;
+  };
+
   // disable test-enable
   logic        test_en;
   logic        ndmreset;
@@ -71,6 +65,8 @@ module ariane_testharness #(
   logic        init_done;
   logic [31:0] jtag_exit, dmi_exit;
   logic [31:0] rvfi_exit;
+  logic [31:0] tracer_exit;
+  logic [31:0] tandem_exit;
 
   logic        jtag_TCK;
   logic        jtag_TMS;
@@ -134,7 +130,7 @@ module ariane_testharness #(
   initial begin
     if (!$value$plusargs("jtag_rbb_enable=%b", jtag_enable)) jtag_enable = 'h0;
     if ($test$plusargs("debug_disable")) debug_enable = 'h0; else debug_enable = 'h1;
-    if (riscv::XLEN != 32 & riscv::XLEN != 64) $error("XLEN different from 32 and 64");
+    if (CVA6Cfg.XLEN != 32 & CVA6Cfg.XLEN != 64) $error("CVA6Cfg.XLEN different from 32 and 64");
   end
 
   // debug if MUX
@@ -552,6 +548,7 @@ module ariane_testharness #(
   ariane_axi_soc::resp_slv_t axi_clint_resp;
 
   clint #(
+    .CVA6Cfg        ( CVA6Cfg                      ),
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
@@ -584,12 +581,7 @@ module ariane_testharness #(
     .AxiIdWidth   ( ariane_axi_soc::IdWidthSlave ),
     .AxiUserWidth ( AXI_USER_WIDTH               ),
 `ifndef VERILATOR
-  // disable UART when using Spike, as we need to rely on the mockuart
-  `ifdef SPIKE_TANDEM
-    .InclUART     ( 1'b0                     ),
-  `else
     .InclUART     ( 1'b1                     ),
-  `endif
 `else
     .InclUART     ( 1'b0                     ),
 `endif
@@ -630,12 +622,15 @@ module ariane_testharness #(
   // ---------------
   ariane_axi::req_t    axi_ariane_req;
   ariane_axi::resp_t   axi_ariane_resp;
-  rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0] rvfi;
+  rvfi_probes_t rvfi_probes;
+  rvfi_csr_t rvfi_csr;
+  rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0]  rvfi_instr;
 
   ariane #(
     .CVA6Cfg              ( CVA6Cfg             ),
-    .IsRVFI               ( IsRVFI              ),
-    .rvfi_instr_t         ( rvfi_instr_t        ),
+    .rvfi_probes_instr_t  ( rvfi_probes_instr_t ),
+    .rvfi_probes_csr_t    ( rvfi_probes_csr_t   ),
+    .rvfi_probes_t        ( rvfi_probes_t       ),
     .noc_req_t            ( ariane_axi::req_t   ),
     .noc_resp_t           ( ariane_axi::resp_t  )
   ) i_ariane (
@@ -646,7 +641,7 @@ module ariane_testharness #(
     .irq_i                ( irqs                ),
     .ipi_i                ( ipi                 ),
     .time_irq_i           ( timer_irq           ),
-    .rvfi_o               ( rvfi                ),
+    .rvfi_probes_o        ( rvfi_probes         ),
 // Disable Debug when simulating with Spike
 `ifdef SPIKE_TANDEM
     .debug_req_i          ( 1'b0                ),
@@ -677,19 +672,91 @@ module ariane_testharness #(
     end
   end
 
+
+
+  cva6_rvfi #(
+      .CVA6Cfg   (CVA6Cfg),
+      .rvfi_instr_t(rvfi_instr_t),
+      .rvfi_csr_t(rvfi_csr_t),
+      .rvfi_probes_instr_t(rvfi_probes_instr_t),
+      .rvfi_probes_csr_t(rvfi_probes_csr_t),
+      .rvfi_probes_t(rvfi_probes_t)
+  ) i_cva6_rvfi (
+      .clk_i     (clk_i),
+      .rst_ni    (rst_ni),
+      .rvfi_probes_i(rvfi_probes),
+      .rvfi_instr_o(rvfi_instr),
+      .rvfi_csr_o(rvfi_csr)
+  );
+
   rvfi_tracer  #(
     .CVA6Cfg(CVA6Cfg),
     .rvfi_instr_t(rvfi_instr_t),
+    .rvfi_csr_t(rvfi_csr_t),
     //
     .HART_ID(hart_id),
     .DEBUG_START(0),
     .DEBUG_STOP(0)
-  ) rvfi_tracer_i (
+  ) i_rvfi_tracer (
     .clk_i(clk_i),
     .rst_ni(rst_ni),
-    .rvfi_i(rvfi),
-    .end_of_test_o(rvfi_exit)
+    .rvfi_i(rvfi_instr),
+    .rvfi_csr_i(rvfi_csr),
+    .end_of_test_o(tracer_exit)
   );
+
+`ifdef SPIKE_TANDEM
+    spike #(
+        .CVA6Cfg ( CVA6Cfg ),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t)
+    ) i_spike (
+        .clk_i,
+        .rst_ni,
+        .clint_tick_i   ( rtc_i    ),
+        .rvfi_i         ( rvfi_instr ),
+        .rvfi_csr_i     ( rvfi_csr ),
+        .end_of_test_o  ( tandem_exit )
+    );
+    initial begin
+        $display("Running binary in tandem mode");
+    end
+
+    bit tandem_timeout_enable;
+    bit [31:0] tandem_timeout;
+    localparam TANDEM_TIMEOUT_THRESHOLD = 60;
+
+    // Tandem timeout logic
+    always_ff @(posedge clk_i) begin
+        if(tandem_timeout > TANDEM_TIMEOUT_THRESHOLD)
+            tandem_timeout_enable <= 0;
+        else if (tracer_exit)
+            tandem_timeout_enable <= 1;
+
+        if (tandem_timeout_enable)
+            tandem_timeout <= tandem_timeout + 1;
+    end
+
+    always_ff @(posedge clk_i) begin
+        if (tandem_exit || (tandem_timeout > TANDEM_TIMEOUT_THRESHOLD)) begin
+            rvfi_exit <= tracer_exit;
+        end
+
+    end
+`else
+    assign rvfi_exit = tracer_exit;
+`endif
+
+`ifdef VERILATOR
+    initial begin
+        string verbosity;
+        if ($value$plusargs("UVM_VERBOSITY=%s",verbosity)) begin
+          uvm_set_verbosity_level(verbosity);
+          `uvm_info("ariane_testharness", $sformatf("Set UVM_VERBOSITY to %s", verbosity), UVM_NONE)
+        end
+    end
+`endif
+
 
 `ifdef AXI_SVA
   // AXI 4 Assertion IP integration - You will need to get your own copy of this IP if you want
